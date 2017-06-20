@@ -2,7 +2,15 @@
     "name": "abramovks/zf1_extensions",
     "description": "ZF1 additional classes",
     "type": "library",
-    "require": {
+    "keywords": [
+        "framework", "zf1"
+    ],
+    "homepage": "http://framework.zend.com/",
+    "license": "BSD-3-Clause",
+    "include-path": [
+        "src/"
+    ],
+        "require": {
         "zendframework/zendframework1": "^1.12"
     },
     "authors": [
