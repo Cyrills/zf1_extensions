@@ -1,5 +1,5 @@
 {
-    "name": "abramovks/zf_extensions",
+    "name": "abramovks/zf1_extensions",
     "description": "ZF1 additional classes",
     "type": "library",
     "require": {
