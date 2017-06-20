@@ -21,9 +21,6 @@
  * @version    $Id$
  */
 
-namespace Zend\Cache\Backend;
-use Zend\Cache;
-
 
 /**
 * @see Zend_Cache_Backend_Interface
