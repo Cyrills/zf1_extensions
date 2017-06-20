@@ -44,7 +44,7 @@ require_once 'Zend/Cache/Backend.php';
  * @author Abramov Cyrill
  * @version 0.0.1
  */
-class Apcu extends Zend_Cache_Backend implements Zend_Cache_Backend_ExtendedInterface
+class Zend_Cache_Backend_Apcu extends Zend_Cache_Backend implements Zend_Cache_Backend_ExtendedInterface
 {
 	
 	/**

@@ -1,18 +1,12 @@
 <?php
-
 /**
  * @see Zend_Cache_Backend
  */
 #require_once 'Zend/Cache/Backend.php';
-
 /**
  * @see Zend_Cache_Backend_ExtendedInterface
  */
 #require_once 'Zend/Cache/Backend/ExtendedInterface.php';
-
-namespace Zend\Cache\Backend;
-use Zend\Cache;
-
 /**
  * Redis adapter for Zend_Cache
  * 
@@ -20,67 +14,56 @@ use Zend\Cache;
  * @author Colin Mollenhour
  * @version 0.0.1
  */
-class Redis extends AbstractBackend implements ExtendedBackend
+class Zend_Cache_Backend_Redis extends Zend_Cache_Backend implements Zend_Cache_Backend_ExtendedInterface
 {
-
     const SET_IDS  = 'zc:ids';
     const SET_TAGS = 'zc:tags';
-
     const PREFIX_DATA     = 'zc:d:';
     const PREFIX_MTIME    = 'zc:m:';
     const PREFIX_TAG_IDS  = 'zc:ti:';
     const PREFIX_ID_TAGS  = 'zc:it:';
-
-    /** @var Credis_Client */
+    /** @var Redis */
     protected $_redis;
-
     /** @var bool */
     protected $_notMatchingTags = FALSE;
-
     /** @var bool */
     protected $_exactMtime = FALSE;
-
     /**
      * Contruct Zend_Cache Redis backend
      * @param array $options
-     * @return \Zend\Cache\Backend\Redis
+     * @return \Zend_Cache_Backend_Redis
      */
     public function __construct($options = array())
     {
         if ($options instanceof Zend_Config) {
             $options = $options->toArray();
         }
-
-        if ( empty($options['server']) ) {
-            Cache\Cache::throwException('Redis \'server\' not specified.');
+        if( empty($options['server']) ) {
+            Zend_Cache::throwException('Redis \'server\' not specified.');
         }
-
-        if ( empty($options['port']) && substr($options['server'],0,1) != '/' ) {
-            Cache\Cache::throwException('Redis \'port\' not specified.');
+        if( empty($options['port']) ) {
+            Zend_Cache::throwException('Redis \'port\' not specified.');
         }
-
-        if( isset($options['timeout'])) {
-          $this->_redis = new \Credis\Client($options['server'], $options['port'], $options['timeout']);
-        } else {
-          $this->_redis = new \Credis\Client($options['server'], $options['port']);
+        // Use redisent if specified or redis module does not exist
+        if( ! extension_loaded('redis') || ( isset($options['use_redisent']) && $options['use_redisent'])) {
+            require_once 'redisent/redisent.php';
+            $this->_redis = new RedisentWrap($options['server'], $options['port'], TRUE);
         }
-
-        if ( isset($options['force_standalone']) && $options['force_standalone']) {
-          $this->_redis->forceStandalone();
+        else {
+            $this->_redis = new Redis;
+            if( ! $this->_redis->connect($options['server'], $options['port']) ) {
+                Zend_Cache::throwException("Could not connect to Redis server {$options['server']}:{$options['port']}");
+            }
         }
-
         if ( ! empty($options['database'])) {
-            $this->_redis->select( (int) $options['database']) or Cache\Cache::throwException('The redis database could not be selected.');
+            $this->_redis->select( (int) $options['database']) or Zend_Cache::throwException('The redis database could not be selected.');
         }
-
         if ( isset($options['notMatchingTags']) ) {
             $this->_notMatchingTags = (bool) $options['notMatchingTags'];
         }
-
         if ( isset($options['exactMtime']) ) {
             $this->_exactMtime = (bool) $options['exactMtime'];
         }
-
         if ( isset($options['automatic_cleaning_factor']) ) {
             $this->_options['automatic_cleaning_factor'] = (int) $options['automatic_cleaning_factor'];
         } else {
@@ -102,7 +85,6 @@ class Redis extends AbstractBackend implements ExtendedBackend
         }
         return $data;
     }
-
     /**
      * Test if a cache is available or not (for the given id)
      *
@@ -120,7 +102,6 @@ class Redis extends AbstractBackend implements ExtendedBackend
             return ($exists ? time() : FALSE);
         }
     }
-
     /**
      * Save some string datas into a cache record
      *
@@ -136,21 +117,13 @@ class Redis extends AbstractBackend implements ExtendedBackend
     public function save($data, $id, $tags = array(), $specificLifetime = false)
     {
         if(!is_array($tags)) $tags = array($tags);
-
         $lifetime = $this->getLifetime($specificLifetime);
-
-        // Get list of tags previously assigned
-        $oldTags = (array) $this->_redis->sMembers(self::PREFIX_ID_TAGS . $id);
-
-        $this->_redis->pipeline();
-
         // Set the data
         if ($lifetime) {
             $this->_redis->setex(self::PREFIX_DATA . $id, $lifetime, $data);
         } else {
             $this->_redis->set(self::PREFIX_DATA . $id, $data);
         }
-
         // Set the modified time
         if($this->_exactMtime) {
             if ($lifetime) {
@@ -159,51 +132,50 @@ class Redis extends AbstractBackend implements ExtendedBackend
                 $this->_redis->set(self::PREFIX_MTIME . $id, time());
             }
         }
-
+        // Get list of tags previously assigned
+        $oldTags = (array) $this->_redis->sMembers(self::PREFIX_ID_TAGS . $id);
         // Process added tags
         if ($addTags = array_diff($tags, $oldTags))
         {
             // Update the list with all the tags
-            $this->_redis->sAdd( self::SET_TAGS, $addTags);
-
+            $this->_redisVariadic('sAdd', self::SET_TAGS, $addTags);
             // Update the list of tags for this id
-            $this->_redis->sAdd( self::PREFIX_ID_TAGS . $id, $addTags);
-
+            $this->_redisVariadic('sAdd', self::PREFIX_ID_TAGS . $id, $addTags);
             // Update the id list for each tag
             foreach($addTags as $tag)
             {
                 $this->_redis->sAdd(self::PREFIX_TAG_IDS . $tag, $id);
             }
         }
-
         // Expire tags set at same time as data
         if (count($tags) > 0 && $lifetime) {
             $this->_redis->expire(self::PREFIX_ID_TAGS . $id, $lifetime);
         }
-
         // Process removed tags
         if ($remTags = array_diff($oldTags, $tags))
         {
             // Remove tags from id's tag set
-            $this->_redis->sRem( self::PREFIX_ID_TAGS . $id, $remTags);
-
-            // Update the id list for each tag
+            $this->_redisVariadic('sRem', self::PREFIX_ID_TAGS . $id, $remTags);
+            // Update the id list for each tag, find empty tags
+            $emptyTags = array();
             foreach($remTags as $tag)
             {
                 $this->_redis->sRem(self::PREFIX_TAG_IDS . $tag, $id);
+                if( ! $this->_redis->sCard(self::PREFIX_TAG_IDS . $tag)) {
+                    $emptyTags[] = $tag;
+                }
+            }
+            // Remove empty tags
+            if($emptyTags) {
+                $this->_redisVariadic('sRem', self::SET_TAGS, $emptyTags);
             }
         }
-
         // Update the list with all the ids
         if($this->_notMatchingTags) {
             $this->_redis->sAdd(self::SET_IDS, $id);
         }
-
-        $this->_redis->exec();
-
         return TRUE;
     }
-
     /**
      * Remove a cache record
      *
@@ -212,125 +184,106 @@ class Redis extends AbstractBackend implements ExtendedBackend
      */
     public function remove($id)
     {
-        // Get list of tags for this id
-        $tags = $this->_redis->sMembers(self::PREFIX_ID_TAGS . $id);
-
-        $this->_redis->pipeline();
-
         // Remove data
-        $this->_redis->del( self::PREFIX_DATA . $id );
-
+        $result = $this->_redis->del( self::PREFIX_DATA . $id );
         // Remove mtime
         if($this->_exactMtime) {
             $this->_redis->del( self::PREFIX_MTIME . $id );
         }
-
         // Remove id from list of all ids
         if($this->_notMatchingTags) {
-            $this->_redis->sRem( self::SET_IDS, $id );
+            $this->_redis->srem( self::SET_IDS, $id );
         }
-
+        // Get list of tags for this id
+        $tags = $this->_redis->sMembers(self::PREFIX_ID_TAGS . $id);
         // Update the id list for each tag
         foreach($tags as $tag) {
-            $this->_redis->sRem(self::PREFIX_TAG_IDS . $tag, $id);
+            $this->_redis->srem(self::PREFIX_TAG_IDS . $tag, $id);
         }
-
         // Remove list of tags
         $this->_redis->del( self::PREFIX_ID_TAGS . $id );
-
-        $result = $this->_redis->exec();
-
-        return (bool) $result[0];
+        return (bool) $result;
     }
-
     protected function _removeByNotMatchingTags($tags)
     {
         $ids = $this->getIdsNotMatchingTags($tags);
-        if($ids)
-        {
-            $this->_redis->pipeline();
-
-            // Remove data
-            $this->_redis->del( $this->_preprocessIds($ids));
-
-            // Remove mtimes
-            if($this->_exactMtime) {
-                $this->_redis->del( $this->_preprocessMtimes($ids));
-            }
-
-            // Remove ids from list of all ids
-            if($this->_notMatchingTags) {
-                $this->_redis->sRem( self::SET_IDS, $ids);
-            }
-
-            // Remove tag lists for all ids
-            $this->_redis->del( $this->_preprocessIdTags($ids));
-
-            $this->_redis->exec();
+        if( ! $ids) {
+            return;
         }
+        // Remove data
+        $this->_redisVariadic('del', $this->_preprocessIds($ids));
+        // Remove mtimes
+        if($this->_exactMtime) {
+            $this->_redisVariadic('del', $this->_preprocessMtimes($ids));
+        }
+        // Remove ids from list of all ids
+        if($this->_notMatchingTags) {
+            $this->_redisVariadic('srem', self::SET_IDS, $ids);
+        }
+        // Update the id list for each tag
+        $tagsToClean = $this->_redisVariadic('sUnion', $this->_preprocessIdTags($ids) );
+        foreach($tagsToClean as $tag) {
+            $this->_redisVariadic('srem', self::PREFIX_TAG_IDS . $tag, $ids);
+        }
+        // Remove tag lists for all ids
+        $this->_redisVariadic('del', $this->_preprocessIdTags($ids));
     }
-
     protected function _removeByMatchingTags($tags)
     {
         $ids = $this->getIdsMatchingTags($tags);
         if($ids)
         {
-            $this->_redis->pipeline();
-
             // Remove data
-            $this->_redis->del( $this->_preprocessIds($ids));
-
+            $this->_redisVariadic('del', $this->_preprocessIds($ids));
             // Remove mtimes
             if($this->_exactMtime) {
-                $this->_redis->del( $this->_preprocessMtimes($ids));
+                $this->_redisVariadic('del', $this->_preprocessMtimes($ids));
             }
-
+            // Remove ids from tags not cleared
+            $idTags = $this->_preprocessIdTags($ids);
+            $otherTags = (array) $this->_redisVariadic('sUnion', $idTags);
+            $otherTags = array_diff($otherTags, $tags);
+            foreach($otherTags as $tag) {
+                $this->_redisVariadic('srem', self::PREFIX_TAG_IDS . $tag, $ids);
+            }
             // Remove tag lists for all ids
-            $this->_redis->del( $this->_preprocessIdTags($ids));
-
+            $this->_redisVariadic('del', $idTags);
             // Remove ids from list of all ids
             if($this->_notMatchingTags) {
-                $this->_redis->sRem( self::SET_IDS, $ids);
+                $this->_redisVariadic('srem', self::SET_IDS, $ids);
             }
-
-            $this->_redis->exec();
         }
     }
-
     protected function _removeByMatchingAnyTags($tags)
     {
         $ids = $this->getIdsMatchingAnyTags($tags);
-
-        $this->_redis->pipeline();
-
         if($ids)
         {
             // Remove data
-            $this->_redis->del( $this->_preprocessIds($ids));
-
+            $this->_redisVariadic('del', $this->_preprocessIds($ids));
             // Remove mtimes
             if($this->_exactMtime) {
-                $this->_redis->del( $this->_preprocessMtimes($ids));
+                $this->_redisVariadic('del', $this->_preprocessMtimes($ids));
             }
-
+            // Remove ids from tags not cleared
+            $idTags = $this->_preprocessIdTags($ids);
+            $otherTags = (array) $this->_redisVariadic('sUnion', $idTags );
+            $otherTags = array_diff($otherTags, $tags);
+            foreach($otherTags as $tag) {
+                $this->_redisVariadic('srem', self::PREFIX_TAG_IDS . $tag, $ids);
+            }
             // Remove tag lists for all ids
-            $this->_redis->del( $this->_preprocessIdTags($ids));
-
+            $this->_redisVariadic('del', $idTags);
             // Remove ids from list of all ids
             if($this->_notMatchingTags) {
-                $this->_redis->sRem( self::SET_IDS, $ids);
+                $this->_redisVariadic('srem', self::SET_IDS, $ids);
             }
         }
-
         // Remove tag id lists
-        $this->_redis->del( $this->_preprocessTagIds($tags));
-
+        $this->_redisVariadic('del', $this->_preprocessTagIds($tags));
         // Remove tags from list of tags
-        $this->_redis->sRem( self::SET_TAGS, $tags);
-
-        $this->_redis->exec();
+        $this->_redisVariadic('srem', self::SET_TAGS, $tags);
     }
-
     protected function _collectGarbage()
     {
         // Clean up expired keys from tag id set and global id set
@@ -340,8 +293,8 @@ class Redis extends AbstractBackend implements ExtendedBackend
         {
             // Get list of expired ids for each tag
             $tagMembers = $this->_redis->sMembers(self::PREFIX_TAG_IDS . $tag);
-            $expired = array();
             if(count($tagMembers)) {
+                $expired = array();
                 foreach($tagMembers as $id) {
                     if( ! isset($exists[$id])) {
                         $exists[$id] = $this->_redis->exists(self::PREFIX_DATA . $id);
@@ -352,9 +305,6 @@ class Redis extends AbstractBackend implements ExtendedBackend
                 }
                 if( ! count($expired)) continue;
             }
-
-            $this->_redis->pipeline();
-
             // Remove empty tags or completely expired tags
             if( ! count($tagMembers) || count($expired) == count($tagMembers)) {
                 $this->_redis->del(self::PREFIX_TAG_IDS . $tag);
@@ -362,23 +312,18 @@ class Redis extends AbstractBackend implements ExtendedBackend
             }
             // Clean up expired ids from tag ids set
             else {
-                $this->_redis->sRem( self::PREFIX_TAG_IDS . $tag, $expired);
+                $this->_redisVariadic('sRem', self::PREFIX_TAG_IDS . $tag, $expired);
             }
-
             // Clean up expired ids from ids set
             if($this->_notMatchingTags) {
-                $this->_redis->sRem( self::SET_IDS, $expired);
+                $this->_redisVariadic('sRem', self::SET_IDS, $expired);
             }
-
-            $this->_redis->exec();
         }
-
         // Clean up global list of ids for ids with no tag
         if($this->_notMatchingTags) {
             // TODO
         }
     }
-
     /**
      * Clean some cache records
      *
@@ -391,53 +336,41 @@ class Redis extends AbstractBackend implements ExtendedBackend
      *
      * @param  string $mode Clean mode
      * @param  array  $tags Array of tags
-     * @throws Cache\Cache_Exception
+     * @throws Zend_Cache_Exception
      * @return boolean True if no problem
      */
-    public function clean($mode = Cache\Cache::CLEANING_MODE_ALL, $tags = array())
+    public function clean($mode = Zend_Cache::CLEANING_MODE_ALL, $tags = array())
     {
         if( $tags && ! is_array($tags)) {
             $tags = array($tags);
         }
-
-        if($mode == Cache\Cache::CLEANING_MODE_ALL) {
+        if($mode == Zend_Cache::CLEANING_MODE_ALL) {
             return ($this->_redis->flushDb() == 'OK');
         }
-
-        if($mode == Cache\Cache::CLEANING_MODE_OLD) {
+        if($mode == Zend_Cache::CLEANING_MODE_OLD) {
             $this->_collectGarbage();
             return TRUE;
         }
-
         if( ! count($tags)) {
             return TRUE;
         }
-
         $result = TRUE;
-
         switch ($mode)
         {
-            case Cache\Cache::CLEANING_MODE_MATCHING_TAG:
-
+            case Zend_Cache::CLEANING_MODE_MATCHING_TAG:
                 $this->_removeByMatchingTags($tags);
                 break;
-
-            case Cache\Cache::CLEANING_MODE_NOT_MATCHING_TAG:
-
+            case Zend_Cache::CLEANING_MODE_NOT_MATCHING_TAG:
                 $this->_removeByNotMatchingTags($tags);
                 break;
-
-            case Cache\Cache::CLEANING_MODE_MATCHING_ANY_TAG:
-
+            case Zend_Cache::CLEANING_MODE_MATCHING_ANY_TAG:
                 $this->_removeByMatchingAnyTags($tags);
                 break;
-
             default:
-                Cache\Cache::throwException('Invalid mode for clean() method: '.$mode);
+                Zend_Cache::throwException('Invalid mode for clean() method: '.$mode);
         }
         return (bool) $result;
     }
-
     /**
      * Return true if the automatic cleaning is available for the backend
      *
@@ -447,12 +380,11 @@ class Redis extends AbstractBackend implements ExtendedBackend
     {
         return TRUE;
     }
-
     /**
      * Set the frontend directives
      *
      * @param  array $directives Assoc of directives
-     * @throws Cache\Cache_Exception
+     * @throws Zend_Cache_Exception
      * @return void
      */
     public function setDirectives($directives)
@@ -460,10 +392,9 @@ class Redis extends AbstractBackend implements ExtendedBackend
         parent::setDirectives($directives);
         $lifetime = $this->getLifetime(false);
         if ($lifetime > 2592000) {
-            Cache\Cache::throwException('Redis backend has a limit of 30 days (2592000 seconds) for the lifetime');
+            Zend_Cache::throwException('Redis backend has a limit of 30 days (2592000 seconds) for the lifetime');
         }
     }
-
     /**
      * Return an array of stored cache ids
      *
@@ -482,7 +413,6 @@ class Redis extends AbstractBackend implements ExtendedBackend
             return $keys;
         }
     }
-
     /**
      * Return an array of stored tags
      *
@@ -492,7 +422,6 @@ class Redis extends AbstractBackend implements ExtendedBackend
     {
         return (array) $this->_redis->sMembers(self::SET_TAGS);
     }
-
     /**
      * Return an array of stored cache ids which match given tags
      *
@@ -503,9 +432,8 @@ class Redis extends AbstractBackend implements ExtendedBackend
      */
     public function getIdsMatchingTags($tags = array())
     {
-        return (array) $this->_redis->sInter( $this->_preprocessTagIds($tags) );
+        return (array) $this->_redisVariadic('sInter', $this->_preprocessTagIds($tags) );
     }
-
     /**
      * Return an array of stored cache ids which don't match given tags
      *
@@ -517,11 +445,10 @@ class Redis extends AbstractBackend implements ExtendedBackend
     public function getIdsNotMatchingTags($tags = array())
     {
         if( ! $this->_notMatchingTags) {
-            Cache\Cache::throwException("notMatchingTags is currently disabled.");
+            Zend_Cache::throwException("notMatchingTags is currently disabled.");
         }
-        return (array) $this->_redis->sDiff( self::SET_IDS, $this->_preprocessTagIds($tags) );
+        return (array) $this->_redisVariadic('sDiff', self::SET_IDS, $this->_preprocessTagIds($tags) );
     }
-
     /**
      * Return an array of stored cache ids which match any given tags
      *
@@ -532,20 +459,18 @@ class Redis extends AbstractBackend implements ExtendedBackend
      */
     public function getIdsMatchingAnyTags($tags = array())
     {
-        return (array) $this->_redis->sUnion( $this->_preprocessTagIds($tags));
+        return (array) $this->_redisVariadic('sUnion', $this->_preprocessTagIds($tags));
     }
-
     /**
      * Return the filling percentage of the backend storage
      *
-     * @throws Cache\Cache_Exception
+     * @throws Zend_Cache_Exception
      * @return int integer between 0 and 100
      */
     public function getFillingPercentage()
     {
         return 0;
     }
-
     /**
      * Return an array of metadatas for the given cache id
      *
@@ -565,14 +490,12 @@ class Redis extends AbstractBackend implements ExtendedBackend
         }
         $ttl = $this->_redis->ttl(self::PREFIX_DATA . $id);
         $tags = (array) $this->_redis->sMembers(self::PREFIX_ID_TAGS . $id );
-
         return array(
             'expire' => time() + $ttl,
             'tags' => $tags, 
             'mtime' => $mtime,
         );
     }
-
     /**
      * Give (if possible) an extra lifetime to the given cache id
      *
@@ -596,7 +519,6 @@ class Redis extends AbstractBackend implements ExtendedBackend
         }
         return false;
     }
-
     /**
      * Return an associative array of capabilities (booleans) of the backend
      *
@@ -622,38 +544,40 @@ class Redis extends AbstractBackend implements ExtendedBackend
             'get_list'           => true,
         );
     }
-
     protected function _preprocess(&$item, $index, $prefix)
     {
         $item = $prefix . $item;
     }
-
     protected function _preprocessItems($items, $prefix)
     {
         array_walk( $items, array($this, '_preprocess'), $prefix);
         return $items;
     }
-
     protected function _preprocessIds($ids)
     {
         return $this->_preprocessItems($ids, self::PREFIX_DATA);
     }
-
     protected function _preprocessMtimes($ids)
     {
         return $this->_preprocessItems($ids, self::PREFIX_MTIME);
     }
-
     protected function _preprocessIdTags($ids)
     {
         return $this->_preprocessItems($ids, self::PREFIX_ID_TAGS);
     }
-
     protected function _preprocessTagIds($tags)
     {
         return $this->_preprocessItems($tags, self::PREFIX_TAG_IDS);
     }
-
+    protected function _redisVariadic($command, $arg1, $args = NULL)
+    {
+        if(is_array($arg1)) {
+            $args = $arg1;
+        } else {
+            array_unshift($args, $arg1);
+        }
+        return call_user_func_array( array($this->_redis, $command), $args);
+    }
     /**
      * Required to pass unit tests
      *
@@ -668,5 +592,4 @@ class Redis extends AbstractBackend implements ExtendedBackend
         }
         $this->_redis->del(self::PREFIX_ID_TAGS . $id);
     }
-
 }
