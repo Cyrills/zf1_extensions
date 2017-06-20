@@ -1,0 +1,19 @@
+{
+    "name": "cyrill/zf_extensions",
+    "description": "ZF1 additional classes",
+    "type": "library",
+    "require": {
+        "zendframework/zendframework1": "^1.12"
+    },
+    "authors": [
+        {
+            "name": "Abramov Cyrill",
+            "email": "abramov.ks@gmail.com"
+        }
+    ],
+     "autoload": {
+        "psr-0": {
+            "Zend_": "src/"
+        }
+    }
+}
